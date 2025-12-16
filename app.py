@@ -1,187 +1,380 @@
-# app.py
 import streamlit as st
 import pandas as pd
-import numpy as np
-import io
-import re
-import plotly.express as px
-import plotly.graph_objects as go
-from sklearn.metrics import mean_squared_error, mean_absolute_error
+from io import BytesIO
+from datetime import datetime, timedelta
+import random
 
-# ============ Настройки ============
-st.set_page_config(layout="wide", page_title="Кванты глубины — анализ", page_icon="💧")
-st.title("💧 Анализ «квант глубины»: IF-ELSE / NN / Эксперт / Эталон")
+st.set_page_config(layout="wide")
 
 st.markdown("""
-Загрузите четыре Excel-файла:
-- **IF-ELSE** — расчёт по условной логике  
-- **NN** — расчёт нейросети  
-- **Expert** — экспертная оценка  
-- **Reference** — эталон  
-
-Формат таблицы:
-| well | depth | value |
-|------|--------|--------|
-| A1 | 1000 | 12.3 |
-
-📘 Можно скачать пример:
-""")
-
-# ============ Пример файла ============
-example_df = pd.DataFrame({
-    "well": ["A1", "A1", "B2", "B2"],
-    "depth": [1000, 1010, 1000, 1010],
-    "value": [12.3, 13.1, 15.2, 14.9]
-})
-buf = io.BytesIO()
-with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-    example_df.to_excel(writer, index=False)
-buf.seek(0)
-st.download_button("📥 Скачать пример Excel-файла", data=buf,
-                   file_name="example_quant_depth.xlsx",
-                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-# ============ Загрузка ============
-uploaded_files = {
-    "if": st.file_uploader("📂 IF-ELSE Excel", type=["xlsx", "xls"], key="if"),
-    "nn": st.file_uploader("📂 NN Excel", type=["xlsx", "xls"], key="nn"),
-    "expert": st.file_uploader("📂 Expert Excel", type=["xlsx", "xls"], key="exp"),
-    "ref": st.file_uploader("📂 Reference Excel", type=["xlsx", "xls"], key="ref")
-}
-
-# ============ Вспомогательные ============
-def try_read(file):
-    try: return pd.read_excel(file)
-    except: return None
-
-def extract_number(x):
-    if pd.isna(x): return np.nan
-    if isinstance(x, (int, float)): return float(x)
-    s = str(x).replace(",", ".")
-    m = re.search(r"[-+]?\d+(\.\d+)?", s)
-    return float(m.group(0)) if m else np.nan
-
-def normalize(df):
-    if df is None: return None
-    df = df.copy()
-    df.columns = [c.lower().strip() for c in df.columns]
-    wells = ["well", "скважина"]
-    depths = ["depth", "глубина"]
-    values = ["value", "значение", "квант"]
-    w = next((c for c in df.columns if c in wells), None)
-    d = next((c for c in df.columns if c in depths), None)
-    v = next((c for c in df.columns if c in values), None)
-    if not all([w, d, v]): return None
-    df = df[[w, d, v]]
-    df.columns = ["well", "depth", "value"]
-    df["depth"] = df["depth"].apply(extract_number)
-    df["value"] = df["value"].apply(extract_number)
-    df.dropna(inplace=True)
-    return df
-
-def safe_mape(y_true, y_pred):
-    eps = 1e-8
-    denom = np.maximum(np.abs(y_true), eps)
-    return np.mean(np.abs((y_true - y_pred) / denom)) * 100
-
-def metrics(df, col):
-    mask = df["ref"].notna() & df[col].notna()
-    if mask.sum() == 0:
-        return {"RMSE": np.nan, "MAE": np.nan, "MAPE": np.nan}
-    y, yhat = df.loc[mask, "ref"], df.loc[mask, col]
-    return {
-        "RMSE": np.sqrt(mean_squared_error(y, yhat)),
-        "MAE": mean_absolute_error(y, yhat),
-        "MAPE": safe_mape(y, yhat)
+    <style>
+    .stApp {
+        background-color: #f5f7fa;
+        font-family: 'Segoe UI', sans-serif;
+        font-size: 13px;
     }
+    .stage-column {
+        background-color: #ffffff;
+        border-radius: 8px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        border: 1px solid #e0e0e0;
+        padding: 16px;
+        margin: 0 10px;
+        min-width: 300px;
+    }
+    .stage-header {
+        font-weight: 600;
+        font-size: 15px;
+        margin-bottom: 15px;
+        padding-bottom: 10px;
+        border-bottom: 2px solid #009ee0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .stage-arrows button {
+        background: none;
+        border: none;
+        font-size: 18px;
+        color: #666;
+        cursor: pointer;
+    }
+    .task-box {
+        background-color: #ffffff;
+        border: 2px solid #d0d0d0;
+        border-radius: 8px;
+        padding: 14px;
+        margin-bottom: 12px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+        cursor: grab;
+        transition: all 0.2s ease;
+    }
+    .task-box:hover {
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        border-color: #009ee0;
+        transform: translateY(-2px);
+    }
+    .task-id {
+        font-weight: 600;
+        font-size: 14px;
+        color: #009ee0;
+        margin-bottom: 8px;
+    }
+    .task-name {
+        font-weight: 500;
+        font-size: 14px;
+        margin-bottom: 10px;
+        line-height: 1.4;
+    }
+    .status-badge {
+        font-size: 11px;
+        padding: 4px 8px;
+        border-radius: 12px;
+        color: white;
+        display: inline-block;
+        margin-bottom: 10px;
+    }
+    .green { background-color: #009ee0; }
+    .red { background-color: #f15a22; }
+    .blue { background-color: #666666; }
+    .task-detail {
+        font-size: 12px;
+        margin-bottom: 6px;
+        color: #444;
+    }
+    .avatar {
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background-color: #009ee0;
+        display: inline-block;
+        vertical-align: middle;
+        margin-right: 8px;
+    }
+    .add-button {
+        width: 100%;
+        text-align: center;
+        padding: 12px;
+        background-color: #f8f9fa;
+        border: 2px dashed #009ee0;
+        border-radius: 8px;
+        color: #009ee0;
+        font-weight: 500;
+        cursor: pointer;
+        margin-top: 10px;
+    }
+    .top-bar {
+        background-color: #ffffff;
+        padding: 12px 20px;
+        border-bottom: 1px solid #e0e0e0;
+        margin-bottom: 20px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .top-left {
+        display: flex;
+        align-items: center;
+        gap: 25px;
+    }
+    .user-info {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-# ============ Основная логика ============
-if all(uploaded_files.values()):
-    dfs = {k: normalize(try_read(v)) for k, v in uploaded_files.items()}
-    if any(v is None for v in dfs.values()):
-        st.error("❌ Проверьте формат таблиц (well, depth, value).")
-    else:
-        st.success("✅ Все файлы успешно загружены!")
+# Полные списки
+personnel = [
+    "Сюндюков А. В.", "Иванова Е. П.", "Петров С. М.", "Сидорова О. И.", "Козлов Д. А.",
+    "Николаев Г. Р.", "Макарова В. Л.", "Орлов Н. С.", "Васнецова Т. К.", "Жуков П. Ф.",
+    "Алексеева М. Д.", "Тихонов И. Г.", "Павлова А. Н.", "Фролов В. Я.", "Савельев К. О.",
+    "Морозова Л. Б.", "Белов Р. Т.", "Комарова Ю. Э.", "Громов Е. Ц.", "Ильина Н. Ч.",
+    "Данилов Б. Х.", "Семёнова З. Щ.", "Блинов М. Ю.", "Ларина А. Ж.", "Гордеев И. У."
+]
 
-        ref = dfs["ref"].rename(columns={"value": "ref"})
-        merged = ref
-        for k in ["if", "nn", "expert"]:
-            df = dfs[k].rename(columns={"value": k})
-            merged = pd.merge(merged, df, on=["well", "depth"], how="outer")
+systems_list = [
+    "Сервис Микросервис Б6К Расчет ХВ скважин", "Б6К Расчет Кпрод скважин", "Б6К Расчет Pпл скважин",
+    "Б6К Расчет запасов скважин", "Спектр spektr-addperforations", "Спектр Расчёт ГРП",
+    "Спектр Сервис оптимизации тех параметров", "Спектр Сервис ОПЗ", "Спектр Расчёт проницаемости",
+    "Спектр Расчёт восстановления давления", "Спектр Расчёт ПВЛГ", "Спектр Расчёт ВБД",
+    "Спектр Расчет ЗБС", "eXoil Адаптация модели пласта на основе метода граничных элементов",
+    "eXoil Модель вытеснения на основе линий тока", "eXoil Оптимизатор ППД", "eXoil Проектные скважины",
+    "eXoil АТСР", "eXoil Расчет запусконого дебита по скважине",
+    "eXoil Адаптация модели пласта на основе метода граничных элементов",
+    "eXoil Модель пласта на основе метода граничных элементов",
+    "eXoil Модель вытеснения на основе линий тока", "eXoil Оптимизатор ППД",
+    "eXoil Проектные скважины", "ГибрИМА Расчёт IPR-кривых", "ГибрИМА Расчёт узлового анализа",
+    "ГибрИМА Оптимизатор режимов работы скважин с учётом влияния устьевого давления",
+    "ЦД велл Расчет PVT свойств", "ЦД велл Расчет продуктивности",
+    "ЦД велл Расчет кривых распределения давления и температуры по стволу (Моделирование VLP)",
+    "ЦД велл Расчет узлового анализа", "ЦД велл Расчет анализа чувствительности"
+]
 
-        # Общие метрики
-        all_metrics = {m: metrics(merged, m) for m in ["if", "nn", "expert"]}
-        st.subheader("🧮 Общие метрики")
-        st.dataframe(pd.DataFrame(all_metrics).T.style.background_gradient(cmap="YlGnBu"))
+# Инициализация с предзаполнением
+if 'stages' not in st.session_state:
+    st.session_state.stages = [
+        "Сквозной сценарий повышения эффективности базовой добычи ДО Хантос",
+        "Анализ гипотез повышения эффективности базовой добычи",
+        "Актуализация цифровых двойников рассматриваемых активов",
+        "Интегрированные расчёты на целевых активах",
+        "Митигация рисков осложнений"
+    ]
+    st.session_state.tasks = {stage: [] for stage in st.session_state.stages}
 
-        # Метрики по скважинам
-        wells = merged["well"].unique()
-        summary = []
-        for w in wells:
-            sub = merged[merged["well"] == w]
-            for m in ["if", "nn", "expert"]:
-                summary.append({"well": w, "method": m, **metrics(sub, m)})
-        summary_df = pd.DataFrame(summary)
+    # Предзаполнение карточек
+    st.session_state.tasks[st.session_state.stages[0]].append({
+        'id': 'M14500',
+        'name': "Анализ эффективности текущего состояния разработки и эксплуатации актива",
+        'executor': random.choice(personnel),
+        'approver': random.choice(personnel),
+        'deadline': (datetime.now() + timedelta(days=15)).date(),
+        'status': 'в работе',
+        'systems': random.sample(systems_list, k=random.randint(1, 3)),
+        'date': datetime.now().strftime("%d.%m.%Y")
+    })
+    for name in ["Подбор ГТМ на добывающем фонде на целевых активах", "Подбор ГТМ на нагнетательном фонде на целевых активах", "Оптимизация проектного фонда"]:
+        st.session_state.tasks[st.session_state.stages[1]].append({
+            'id': f'M{random.randint(14501, 14999)}',
+            'name': name,
+            'executor': random.choice(personnel),
+            'approver': random.choice(personnel),
+            'deadline': (datetime.now() + timedelta(days=random.randint(10, 40))).date(),
+            'status': random.choice(['в работе', 'завершен', 'ошибка']),
+            'systems': random.sample(systems_list, k=random.randint(1, 4)),
+            'date': datetime.now().strftime("%d.%m.%Y")
+        })
+    for name in ["Актуализация модели инфраструктуры", "Актуализация модели скважин", "Актуализация модели пласта"]:
+        st.session_state.tasks[st.session_state.stages[2]].append({
+            'id': f'M{random.randint(14501, 14999)}',
+            'name': name,
+            'executor': random.choice(personnel),
+            'approver': random.choice(personnel),
+            'deadline': (datetime.now() + timedelta(days=random.randint(10, 40))).date(),
+            'status': random.choice(['в работе', 'завершен', 'ошибка']),
+            'systems': random.sample(systems_list, k=random.randint(1, 4)),
+            'date': datetime.now().strftime("%d.%m.%Y")
+        })
+    st.session_state.tasks[st.session_state.stages[3]].append({
+        'id': f'M{random.randint(14501, 14999)}',
+        'name': "Интегрированные расчёты на целевых активах",
+        'executor': random.choice(personnel),
+        'approver': random.choice(personnel),
+        'deadline': (datetime.now() + timedelta(days=random.randint(10, 40))).date(),
+        'status': 'в работе',
+        'systems': random.sample(systems_list, k=random.randint(1, 3)),
+        'date': datetime.now().strftime("%d.%m.%Y")
+    })
+    for name in ["Оценка рисков снижения коэффициента продуктивности из-за выпадения отложений",
+                 "Оценка рисков возникновения дополнительных гидравлических сопротивлений за счёт образования органич. и неорганич. отложений в трубах",
+                 "Оценка рисков снижения МРП скважинного оборудования"]:
+        st.session_state.tasks[st.session_state.stages[4]].append({
+            'id': f'M{random.randint(14501, 14999)}',
+            'name': name,
+            'executor': random.choice(personnel),
+            'approver': random.choice(personnel),
+            'deadline': (datetime.now() + timedelta(days=random.randint(10, 40))).date(),
+            'status': random.choice(['в работе', 'завершен', 'ошибка']),
+            'systems': random.sample(systems_list, k=random.randint(1, 4)),
+            'date': datetime.now().strftime("%d.%m.%Y")
+        })
 
-        # Heatmap
-        st.subheader("🔥 Тепловая карта MAPE по скважинам и методам")
-        pivot = summary_df.pivot(index="well", columns="method", values="MAPE")
-        fig_heat = px.imshow(pivot, color_continuous_scale="YlOrRd",
-                             labels=dict(x="Метод", y="Скважина", color="MAPE %"),
-                             text_auto=".1f", aspect="auto")
-        st.plotly_chart(fig_heat, use_container_width=True)
+# Состояние редактирования и создания
+if 'editing_task' not in st.session_state:
+    st.session_state.editing_task = None  # (stage_index, task_index) или None
+if 'creating_task' not in st.session_state:
+    st.session_state.creating_task = None  # stage_index или None
 
-        # 3D-график ошибок
-        st.subheader("🌐 3D-график распределения ошибок по глубине и скважинам")
-        mape_points = []
-        for w in wells:
-            sub = merged[merged["well"] == w]
-            for m in ["if", "nn", "expert"]:
-                mask = sub["ref"].notna() & sub[m].notna()
-                if mask.any():
-                    y, yhat = sub.loc[mask, "ref"], sub.loc[mask, m]
-                    mape_local = np.abs((y - yhat) / np.maximum(np.abs(y), 1e-8)) * 100
-                    mape_points.extend(list(zip([w]*len(mape_local), sub.loc[mask, "depth"], mape_local, [m]*len(mape_local))))
+def generate_excel():
+    data = []
+    for s_idx, stage in enumerate(st.session_state.stages, 1):
+        for task in st.session_state.tasks[stage]:
+            row = {
+                "Этап ID": s_idx,
+                "Этап Название": stage,
+                "Карточка ID": task['id'],
+                "Карточка Название": task['name'],
+                "Исполнитель": task['executor'],
+                "Согласующий": task['approver'],
+                "Срок сдачи": task['deadline'],
+                "Статус": task['status'],
+                "Дата создания": task['date'],
+                "Используемые системы": ", ".join(task['systems'])
+            }
+            data.append(row)
+    df = pd.DataFrame(data)
+    output = BytesIO()
+    df.to_excel(output, index=False, engine='openpyxl')
+    output.seek(0)
+    return output.getvalue()
 
-        df3d = pd.DataFrame(mape_points, columns=["well", "depth", "MAPE", "method"])
-        fig3d = px.scatter_3d(df3d, x="depth", y="well", z="MAPE",
-                              color="method", size="MAPE",
-                              color_discrete_map={"if":"blue","nn":"green","expert":"orange"},
-                              labels={"depth":"Глубина (м)", "well":"Скважина", "MAPE":"Ошибка %"},
-                              height=600)
-        fig3d.update_layout(scene=dict(zaxis=dict(range=[0, df3d["MAPE"].max()*1.1])),
-                            template="plotly_white")
-        st.plotly_chart(fig3d, use_container_width=True)
+# Верхняя панель
+st.markdown("<div class='top-bar'>", unsafe_allow_html=True)
+col_left, col_right = st.columns([7, 3])
+with col_left:
+    st.markdown("<div class='top-left'>", unsafe_allow_html=True)
+    st.button("← Назад")
+    st.markdown("<h2 style='margin:0 20px 0 0;display:inline;'>Планировщик производственных задач</h2>", unsafe_allow_html=True)
+    st.markdown("<h3 style='margin:0;display:inline;color:#666;'>ООО \"Газпромнефть-Хантос\" \\ Зимнее</h3>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+with col_right:
+    st.download_button("Выгрузить в Excel", data=generate_excel(), file_name="tasks.xlsx")
+    st.markdown('<div class="avatar"></div>', unsafe_allow_html=True)
+    st.markdown("<div style='text-align:right;'><strong>Сюндюков АВ</strong><br><small>Ведущий эксперт</small></div>", unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
 
-        # График по выбранной скважине
-        st.subheader("📈 Графики по выбранной скважине")
-        well_sel = st.selectbox("Выберите скважину:", options=wells)
-        sub = merged[merged["well"] == well_sel].sort_values("depth")
+# Контролы
+c1, c2, c3, c4, c5, c6, c7 = st.columns([1.5,1,1,1,1,1,2])
+with c1:
+    st.text_input("Поиск")
+with c2:
+    st.button("Фильтры")
+with c3:
+    st.toggle("Упрощенный вид")
+with c4:
+    st.toggle("Подробный вид", value=True)
+with c5:
+    st.button("Онтология")
+with c6:
+    if st.button("+ Добавить этап"):
+        st.session_state.stages.insert(0, "Новый этап")
+        st.session_state.tasks["Новый этап"] = []
+        st.rerun()
+with c7:
+    st.button("Рассчитать")
 
-        fig_line = go.Figure()
-        fig_line.add_trace(go.Scatter(x=sub["depth"], y=sub["ref"], mode="lines+markers",
-                                      name="Reference", line=dict(color="black", width=3)))
-        colors = {"if": "blue", "nn": "green", "expert": "orange"}
-        for m in ["if", "nn", "expert"]:
-            if sub[m].notna().any():
-                fig_line.add_trace(go.Scatter(x=sub["depth"], y=sub[m],
-                                              mode="lines+markers", name=m.upper(),
-                                              line=dict(color=colors[m], dash="dot")))
-        fig_line.update_xaxes(title="Глубина (м)", autorange="reversed")
-        fig_line.update_yaxes(title="Значение")
-        fig_line.update_layout(template="plotly_white", height=500)
-        st.plotly_chart(fig_line, use_container_width=True)
+st.markdown("## ВЗАИМОСВЯЗИ ЭТАПОВ")
 
-        # Скачать
-        buf_out = io.BytesIO()
-        with pd.ExcelWriter(buf_out, engine="openpyxl") as writer:
-            merged.to_excel(writer, "merged", index=False)
-            summary_df.to_excel(writer, "metrics_per_well", index=False)
-            pivot.to_excel(writer, "heatmap", index=True)
-            df3d.to_excel(writer, "3D_data", index=False)
-        buf_out.seek(0)
-        st.download_button("💾 Скачать отчёт (Excel)", data=buf_out,
-                           file_name="quant_analysis_full.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-else:
-    st.info("⬆️ Загрузите все 4 файла для начала анализа.")
+st.markdown("<div style='overflow-x:auto;white-space:nowrap;padding-bottom:20px;'>", unsafe_allow_html=True)
+cols = st.columns(len(st.session_state.stages))
+
+for i, stage in enumerate(st.session_state.stages):
+    with cols[i]:
+        st.markdown(f"<div class='stage-column'>", unsafe_allow_html=True)
+        header_left, header_right = st.columns([4, 1])
+        with header_left:
+            st.markdown(f"<div class='stage-header'>{stage}</div>", unsafe_allow_html=True)
+        with header_right:
+            st.markdown("<div class='stage-arrows'>", unsafe_allow_html=True)
+            if i > 0:
+                if st.button("←", key=f"stage_left_{i}"):
+                    st.session_state.stages[i-1], st.session_state.stages[i] = st.session_state.stages[i], st.session_state.stages[i-1]
+                    st.rerun()
+            if i < len(st.session_state.stages)-1:
+                if st.button("→", key=f"stage_right_{i}"):
+                    st.session_state.stages[i], st.session_state.stages[i+1] = st.session_state.stages[i+1], st.session_state.stages[i]
+                    st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # Карточки
+        for j, task in enumerate(st.session_state.tasks[stage]):
+            # Если эта карточка редактируется или создаётся новая
+            if st.session_state.editing_task == (i, j) or (st.session_state.creating_task == i and j == len(st.session_state.tasks[stage]) - 1 and st.session_state.editing_task is None):
+                with st.form(key=f"form_{i}_{j}"):
+                    new_name = st.text_input("Название задачи", value=task['name'])
+                    new_executor = st.selectbox("Исполнитель", personnel, index=personnel.index(task['executor']))
+                    new_approver = st.selectbox("Согласующий", personnel, index=personnel.index(task['approver']))
+                    new_deadline = st.date_input("Срок сдачи", value=task['deadline'])
+                    new_status = st.selectbox("Статус", ["в работе", "завершен", "ошибка"], index=["в работе", "завершен", "ошибка"].index(task['status']))
+                    new_systems = st.multiselect("Используемые системы", systems_list, default=task['systems'])
+
+                    col_save, col_cancel = st.columns(2)
+                    with col_save:
+                        if st.form_submit_button("Сохранить"):
+                            task['name'] = new_name
+                            task['executor'] = new_executor
+                            task['approver'] = new_approver
+                            task['deadline'] = new_deadline
+                            task['status'] = new_status
+                            task['systems'] = new_systems
+                            st.session_state.editing_task = None
+                            st.session_state.creating_task = None
+                            st.rerun()
+                    with col_cancel:
+                        if st.form_submit_button("Отмена"):
+                            if st.session_state.creating_task == i:
+                                st.session_state.tasks[stage].pop()  # Удалить новую
+                            st.session_state.editing_task = None
+                            st.session_state.creating_task = None
+                            st.rerun()
+            else:
+                # Обычный вид карточки
+                with st.expander(f"{task['id']} — {task['name']}", expanded=False):
+                    st.markdown(f"<div class='task-box'>", unsafe_allow_html=True)
+                    status_map = {'завершен': 'green', 'ошибка': 'red', 'в работе': 'blue'}
+                    st.markdown(f"<span class='status-badge {status_map[task['status']]}'>{task['status']}</span>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='task-detail'><strong>Срок:</strong> {task['deadline']}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='task-detail'><strong>Исполнитель:</strong> {task['executor']}</div>", unsafe_allow_html=True)
+                    st.markdown('<div class="avatar"></div>', unsafe_allow_html=True)
+                    st.markdown(f"<div class='task-detail'><strong>Согласующий:</strong> {task['approver']}</div>", unsafe_allow_html=True)
+                    st.markdown('<div class="avatar"></div>', unsafe_allow_html=True)
+                    st.markdown("<div class='task-detail'><strong>Системы:</strong></div>", unsafe_allow_html=True)
+                    for sys in task['systems']:
+                        st.markdown(f"<div class='task-detail'>- {sys}</div>", unsafe_allow_html=True)
+                    st.markdown("<div class='task-detail'><strong>Выходные данные:</strong></div>", unsafe_allow_html=True)
+                    st.markdown("<a href='https://google.com' target='_blank'>📄 Результаты расчета</a>", unsafe_allow_html=True)
+                    if st.button("Редактировать", key=f"edit_{i}_{j}"):
+                        st.session_state.editing_task = (i, j)
+                        st.rerun()
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+        # Добавление новой задачи
+        if st.button("+ Добавить задачу", key=f"add_{i}"):
+            new_task = {
+                'id': f"M{random.randint(15000, 99999)}",
+                'name': "Новая задача",
+                'executor': personnel[0],
+                'approver': personnel[0],
+                'deadline': datetime.now().date(),
+                'status': "в работе",
+                'systems': [],
+                'date': datetime.now().strftime("%d.%m.%Y")
+            }
+            st.session_state.tasks[stage].append(new_task)
+            st.session_state.editing_task = (i, len(st.session_state.tasks[stage]) - 1)
+            st.rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown("</div>", unsafe_allow_html=True)
