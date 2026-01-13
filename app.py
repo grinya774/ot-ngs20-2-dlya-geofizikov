@@ -11,9 +11,9 @@ import numpy as np
 import warnings
 import os
 import tempfile
+import json
 
 warnings.filterwarnings('ignore')
-# Настройки для лучшего отображения
 plt.rcParams['figure.figsize'] = [16, 12]
 plt.rcParams['font.size'] = 10
 
@@ -66,7 +66,6 @@ if 'view_mode' not in st.session_state:
 if 'expanded_states' not in st.session_state:
     st.session_state.expanded_states = {}
 
-
 # Функции для экспорта и импорта
 def generate_excel():
     data = []
@@ -93,7 +92,6 @@ def generate_excel():
     output.seek(0)
     return output.getvalue()
 
-
 def generate_template():
     columns = ["Этап Название", "Карточка ID", "Карточка Название", "Исполнитель", "Согласующий", "Срок сдачи",
                "Статус", "Дата создания", "Используемые системы", "Входные данные", "Выходные данные"]
@@ -102,7 +100,6 @@ def generate_template():
     df.to_excel(output, index=False, engine='openpyxl')
     output.seek(0)
     return output.getvalue()
-
 
 def load_board_from_excel(df):
     if df.empty:
@@ -115,7 +112,6 @@ def load_board_from_excel(df):
         return False
     new_stages = []
     new_tasks = {}
-    # Группируем по Этап и Карточка ID
     grouped = df.groupby(['Этап Название', 'Карточка ID'])
     for (stage, card_id), group in grouped:
         if stage not in new_tasks:
@@ -143,27 +139,257 @@ def load_board_from_excel(df):
                 'input': row['Входные данные'],
                 'output': row['Выходные данные']
             }
-            if entry['system']:  # Добавляем только если system не пустой
+            if entry['system']:
                 task['entries'].append(entry)
-        # Проверяем, нет ли дубликата задачи
         if not any(t['id'] == card_id for t in new_tasks[stage]):
             new_tasks[stage].append(task)
-    st.session_state.stages = list(set(new_stages))  # Уникальные этапы
+    st.session_state.stages = list(set(new_stages))
     st.session_state.tasks = new_tasks
     st.session_state.loaded = True
     return True
 
+# Замени старую generate_oilflow_html на эту
+def generate_oilflow_html():
+    if len(st.session_state.stages) == 0:
+        return "<html><body><h1 style='text-align:center; margin-top:200px;'>Нет данных — добавьте этапы и задачи</h1></body></html>".encode('utf-8')
+
+    nodes = []
+    edges = []
+    node_id_counter = 0
+
+    x_base = 100
+    for stage_idx, stage_name in enumerate(st.session_state.stages):
+        stage_node_id = node_id_counter
+        nodes.append({
+            'id': stage_node_id,
+            'label': stage_name,
+            'x': x_base + stage_idx * 450,
+            'y': 120,
+            'color': {'background': '#3b82f6', 'border': '#1e40af'},
+            'font': {'color': '#ffffff', 'size': 16},
+            'shape': 'box',
+            'widthConstraint': {'minimum': 220},
+            'heightConstraint': {'minimum': 60},
+            'margin': 14,
+            'shadow': {'enabled': True, 'color': 'rgba(0,0,0,0.2)', 'size': 8, 'x': 3, 'y': 3}
+        })
+        node_id_counter += 1
+
+        y = 280
+        for task_idx, task in enumerate(st.session_state.tasks.get(stage_name, [])):
+            task_node_id = node_id_counter
+            status_color = {
+                'в работе': '#f59e0b',
+                'завершен': '#10b981',
+                'ошибка': '#ef4444'
+            }.get(task['status'], '#d1d5db')
+
+            short_label = f"{task['id']} — {task['name'][:35]}..."
+
+            nodes.append({
+                'id': task_node_id,
+                'label': short_label,
+                'x': x_base + stage_idx * 450 + 60,
+                'y': y + task_idx * 140,
+                'color': {'background': '#ffffff', 'border': status_color},
+                'font': {'color': '#1f2937', 'size': 14},
+                'shape': 'box',
+                'widthConstraint': {'minimum': 260},
+                'heightConstraint': {'minimum': 50},
+                'margin': 12,
+                'shadow': {'enabled': True, 'color': 'rgba(0,0,0,0.15)', 'size': 6, 'x': 2, 'y': 2}
+            })
+            node_id_counter += 1
+
+            edges.append({
+                'from': stage_node_id,
+                'to': task_node_id,
+                'arrows': 'to',
+                'smooth': {'type': 'cubicBezier', 'roundness': 0.6},
+                'color': {'color': '#64748b', 'highlight': '#3b82f6'},
+                'width': 1.5
+            })
+
+    nodes_json = json.dumps(nodes)
+    edges_json = json.dumps(edges)
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <title>OilFlow — Интерактивный граф задач</title>
+        <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+        <style>
+            body {{ margin:0; padding:0; overflow:hidden; background:#f1f5f9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
+            #mynetwork {{ 
+                width:100vw; 
+                height:100vh; 
+                background-image: 
+                    radial-gradient(circle at 10px 10px, #9ca3af 1px, transparent 1px),
+                    radial-gradient(circle at 30px 30px, #9ca3af 1px, transparent 1px);
+                background-size: 20px 20px;
+            }}
+            #instructions {{
+                position: absolute;
+                top: 10px;
+                left: 10px;
+                background: rgba(255,255,255,0.95);
+                padding: 10px 14px;
+                border-radius: 8px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+                z-index: 999;
+                font-size: 12px;
+                line-height: 1.4;
+                max-width: 280px;
+                border: 1px solid #e5e7eb;
+                pointer-events: none;
+            }}
+            #instructions strong {{ color: #1d4ed8; }}
+            .selected-source {{
+                border: 4px solid #60a5fa !important;
+                box-shadow: 0 0 12px rgba(96,165,250,0.6) !important;
+            }}
+        </style>
+    </head>
+    <body>
+        <div id="mynetwork"></div>
+        <div id="instructions">
+            <strong>Управление:</strong><br>
+            • Перетаскивание узлов — свободно<br>
+            • Создание связи — кликните на узел-источник, затем на узел-цель<br>
+            • Отмена выбора — клик по пустому месту<br>
+            • Удаление — выделите → Delete<br>
+            • Зум/пан — колесо / правая кнопка + drag<br>
+            • Добавить узел — правая кнопка на пустом месте → выбрать тип и название
+        </div>
+
+        <script>
+            var nodes = new vis.DataSet({nodes_json});
+            var edges = new vis.DataSet({edges_json});
+
+            var container = document.getElementById('mynetwork');
+            var data = {{ nodes: nodes, edges: edges }};
+
+            var options = {{
+                nodes: {{
+                    shape: 'box',
+                    font: {{ multi: true, size: 14, face: 'Arial' }},
+                    margin: 14,
+                    borderWidth: 2,
+                    shadow: true
+                }},
+                edges: {{
+                    arrows: 'to',
+                    smooth: {{ type: 'cubicBezier', roundness: 0.6 }},
+                    color: {{ inherit: 'to', highlight: '#3b82f6' }},
+                    width: 1.5
+                }},
+                physics: {{ enabled: false }},
+                layout: {{ hierarchical: {{ enabled: false }} }},
+                interaction: {{
+                    dragNodes: true,
+                    dragView: true,
+                    zoomView: true,
+                    multiselect: true,
+                    hover: true,
+                    navigationButtons: true,
+                    selectable: true
+                }}
+            }};
+
+            var network = new vis.Network(container, data, options);
+
+            var selectedSource = null;
+
+            network.on("click", function(params) {{
+                if (params.nodes.length > 0) {{
+                    var clickedNode = params.nodes[0];
+
+                    if (selectedSource === null) {{
+                        selectedSource = clickedNode;
+                        // Добавляем класс вместо изменения цвета
+                        network.body.nodes[clickedNode].options.className = 'selected-source';
+                        network.redraw();
+                    }} else if (selectedSource !== clickedNode) {{
+                        var newEdgeId = 'e_custom_' + Date.now();
+                        edges.add({{
+                            id: newEdgeId,
+                            from: selectedSource,
+                            to: clickedNode,
+                            arrows: 'to',
+                            smooth: {{ type: 'cubicBezier', roundness: 0.6 }},
+                            color: {{ color: '#64748b', highlight: '#3b82f6' }},
+                            width: 1.5
+                        }});
+
+                        // Убираем выделение источника
+                        network.body.nodes[selectedSource].options.className = '';
+                        network.redraw();
+
+                        selectedSource = null;
+                    }}
+                }} else {{
+                    if (selectedSource !== null) {{
+                        network.body.nodes[selectedSource].options.className = '';
+                        network.redraw();
+                        selectedSource = null;
+                    }}
+                }}
+            }});
+
+            // Добавление нового узла по правому клику
+            container.addEventListener('contextmenu', function (e) {{
+                e.preventDefault();
+                var pos = network.getViewPosition({{ x: e.clientX, y: e.clientY }});
+
+                var type = prompt("Тип узла: 'этап' или 'задача'?", "задача");
+                if (!type) return;
+
+                var name = prompt("Название нового узла:", type === 'этап' ? 'Новый этап' : 'Новая задача');
+                if (!name) return;
+
+                var newId = nodes.length;
+                var newNode = {{
+                    id: newId,
+                    label: name,
+                    x: pos.x,
+                    y: pos.y,
+                    color: {{ background: type === 'этап' ? '#3b82f6' : '#ffffff', border: type === 'этап' ? '#1e40af' : '#cbd5e1' }},
+                    font: {{ color: type === 'этап' ? '#ffffff' : '#1f2937', size: 14 }},
+                    shape: 'box',
+                    widthConstraint: {{ minimum: type === 'этап' ? 220 : 260 }},
+                    heightConstraint: {{ minimum: 60 }},
+                    margin: 14,
+                    shadow: true
+                }};
+                nodes.add(newNode);
+            }});
+
+            // Удаление по Delete
+            document.addEventListener('keydown', function(e) {{
+                if (e.key === 'Delete' || e.key === 'Backspace') {{
+                    var selectedNodes = network.getSelectedNodes();
+                    var selectedEdges = network.getSelectedEdges();
+                    if (selectedNodes.length > 0 || selectedEdges.length > 0) {{
+                        if (confirm("Удалить выбранные элементы?")) {{
+                            nodes.remove(selectedNodes);
+                            edges.remove(selectedEdges);
+                        }}
+                    }}
+                }}
+            }});
+        </script>
+    </body>
+    </html>
+    """
+    return html.encode('utf-8')
 
 # ===================== 1. ЗАГРУЗКА И ПОДГОТОВКА ДАННЫХ =====================
 def load_and_prepare_data(file_path):
-    """
-    Загружает данные из Excel и подготавливает их для построения графа
-    """
     try:
-        # Проверяем наличие файла
         if not os.path.exists(file_path):
             return None
-        # Чтение Excel файла
         df = pd.read_excel(file_path)
         columns_for_graph = [
             'Этап Название',
@@ -173,44 +399,31 @@ def load_and_prepare_data(file_path):
             'Входные данные',
             'Выходные данные'
         ]
-        # Проверяем наличие всех столбцов
         available_columns = df.columns.tolist()
         missing_columns = [col for col in columns_for_graph if col not in available_columns]
         if missing_columns:
             return None
         df_graph = df[columns_for_graph].copy()
-        # Преобразуем все значения в строки и очищаем от лишних пробелов
         for col in df_graph.columns:
             df_graph[col] = df_graph[col].astype(str).str.strip()
-            # Заменяем 'nan' на пустую строку
             df_graph[col] = df_graph[col].replace('nan', '')
         return df_graph
     except Exception as e:
         return None
 
-
 # ===================== 2. ПОСТРОЕНИЕ ГРАФА =====================
 def build_graph(df):
-    """
-    Строит граф связей между параметрами - упрощённо: только Этап -> Карточка -> Система
-    """
-    # Создаем граф
     G = nx.Graph()
-    # Цвета для разных типов узлов
     node_colors = {
-        'Этап Название': '#FF6B6B',  # Красный
-        'Карточка Название': '#4ECDC4',  # Бирюзовый
-        'Используемые системы': '#06D6A0',  # Зеленый
+        'Этап Название': '#FF6B6B',
+        'Карточка Название': '#4ECDC4',
+        'Используемые системы': '#06D6A0',
     }
-    # Словарь для хранения узлов и их типов
     node_types = {}
-    # Проходим по каждой строке данных
     for idx, row in df.iterrows():
-        # Получаем значения для ключевых столбцов
         stage = row['Этап Название']
         card = row['Карточка Название']
         system = row['Используемые системы']
-        # Фильтруем пустые значения
         if stage:
             node_id = f"Этап Название: {stage}"
             if node_id not in G:
@@ -226,26 +439,20 @@ def build_graph(df):
             if node_id not in G:
                 G.add_node(node_id)
                 node_types[node_id] = 'Используемые системы'
-        # Создаем связи только между ключевыми: Этап -> Карточка -> Система
         if stage and card:
             G.add_edge(f"Этап Название: {stage}", f"Карточка Название: {card}")
         if card and system:
             G.add_edge(f"Карточка Название: {card}", f"Используемые системы: {system}")
     return G, node_types, node_colors
 
-
 # ===================== 3. ВИЗУАЛИЗАЦИЯ ГРАФА (ИНТЕРАКТИВНАЯ С VIS.JS) =====================
 def visualize_interactive_graph(G, node_types, node_colors):
-    """
-    Визуализирует интерактивный граф с vis.js (подвижный, с физикой) - генерирует HTML
-    """
     if G.number_of_nodes() == 0:
         return None
 
-    # Генерация данных для vis.js
     nodes_js = []
     edges_js = []
-    node_id_map = {}  # Для уникальных ID
+    node_id_map = {}
     id_counter = 0
     for node in G.nodes():
         node_type = node_types.get(node, 'Unknown')
@@ -261,7 +468,7 @@ def visualize_interactive_graph(G, node_types, node_colors):
             'label': label,
             'color': color,
             'size': size,
-            'title': node  # Tooltip
+            'title': node
         })
         id_counter += 1
 
@@ -273,7 +480,6 @@ def visualize_interactive_graph(G, node_types, node_colors):
             'width': 1
         })
 
-    # HTML с vis.js (адаптировано из предоставленного HTML)
     html = f"""
     <html>
     <head>
@@ -317,125 +523,55 @@ def visualize_interactive_graph(G, node_types, node_colors):
     """
     return html
 
-
 # ===================== 3. ВИЗУАЛИЗАЦИЯ ГРАФА (СТАТИЧНАЯ, ДЛЯ АНАЛИТИКИ) =====================
 def visualize_graph(G, node_types, node_colors):
-    """
-    Визуализирует граф с цветовой кодировкой (статичный, для совместимости)
-    """
     if G.number_of_nodes() == 0:
         return None, None
-    # Создаем массив цветов для узлов
     node_color_list = []
     node_sizes = []
     for node in G.nodes():
         node_type = node_types.get(node, 'Unknown')
         node_color_list.append(node_colors.get(node_type, '#808080'))
-        # Размер узла зависит от количества связей
         degree = G.degree(node)
         node_sizes.append(100 + degree * 20)
-    # Рассчитываем позиции узлов
     if G.number_of_nodes() < 50:
         pos = nx.spring_layout(G, k=2, iterations=100, seed=42)
     elif G.number_of_nodes() < 200:
         pos = nx.spring_layout(G, k=1.5, iterations=80, seed=42)
     else:
         pos = nx.spring_layout(G, k=1, iterations=60, seed=42)
-    # Создаем фигуру
     fig, ax = plt.subplots(figsize=(20, 16))
-    # Рисуем граф
-    nx.draw_networkx_edges(
-        G, pos,
-        alpha=0.2,
-        edge_color='gray',
-        width=0.8,
-        ax=ax
-    )
-    # Рисуем узлы с разными размерами
-    nx.draw_networkx_nodes(
-        G, pos,
-        node_color=node_color_list,
-        node_size=node_sizes,
-        alpha=0.85,
-        edgecolors='white',
-        linewidths=1.5,
-        ax=ax
-    )
-    # Добавляем подписи к узлам
+    nx.draw_networkx_edges(G, pos, alpha=0.2, edge_color='gray', width=0.8, ax=ax)
+    nx.draw_networkx_nodes(G, pos, node_color=node_color_list, node_size=node_sizes, alpha=0.85, edgecolors='white', linewidths=1.5, ax=ax)
     labels = {}
     for node in G.nodes():
-        # Берем только значение (без префикса типа)
         node_value = node.split(": ", 1)[1] if ": " in node else node
-        # Ограничиваем длину для читаемости
         if len(node_value) > 25:
             labels[node] = node_value[:22] + "..."
         else:
             labels[node] = node_value
-    nx.draw_networkx_labels(
-        G, pos, labels,
-        font_size=9,
-        font_weight='bold',
-        font_family='sans-serif',
-        ax=ax
-    )
-    # Создаем легенду
+    nx.draw_networkx_labels(G, pos, labels, font_size=9, font_weight='bold', font_family='sans-serif', ax=ax)
     legend_patches = []
     for node_type, color in node_colors.items():
-        # Считаем количество узлов этого типа
         count = sum(1 for n_type in node_types.values() if n_type == node_type)
-        patch = mpatches.Patch(
-            color=color,
-            label=f"{node_type} ({count} узлов)",
-            alpha=0.8
-        )
+        patch = mpatches.Patch(color=color, label=f"{node_type} ({count} узлов)", alpha=0.8)
         legend_patches.append(patch)
-    # Добавляем легенду
-    ax.legend(
-        handles=legend_patches,
-        loc='upper left',
-        bbox_to_anchor=(1.05, 1),
-        fontsize=11,
-        framealpha=0.9,
-        title="Типы узлов",
-        title_fontsize=12
-    )
-    # Добавляем заголовок и статистику
-    plt.title(
-        f'Граф связей между параметрами проектов\n'
-        f'Всего узлов: {G.number_of_nodes()}, Связей: {G.number_of_edges()}',
-        fontsize=16,
-        fontweight='bold',
-        pad=25
-    )
-    # Добавляем информацию о графе
-    info_text = f"Плотность графа: {nx.density(G):.4f}\n"
-    info_text += f"Средняя степень узла: {sum(dict(G.degree()).values()) / G.number_of_nodes():.2f}"
-    plt.figtext(
-        0.02, 0.02,
-        info_text,
-        fontsize=10,
-        bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.7)
-    )
-    # Убираем оси
+    ax.legend(handles=legend_patches, loc='upper left', bbox_to_anchor=(1.05, 1), fontsize=11, framealpha=0.9, title="Типы узлов", title_fontsize=12)
+    plt.title(f'Граф связей между параметрами проектов\nВсего узлов: {G.number_of_nodes()}, Связей: {G.number_of_edges()}', fontsize=16, fontweight='bold', pad=25)
+    info_text = f"Плотность графа: {nx.density(G):.4f}\nСредняя степень узла: {sum(dict(G.degree()).values()) / G.number_of_nodes():.2f}"
+    plt.figtext(0.02, 0.02, info_text, fontsize=10, bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.7))
     plt.axis('off')
-    # Настраиваем layout
     plt.tight_layout(rect=[0, 0.03, 0.85, 0.97])
     return fig, ax
 
-
 # ===================== 4. АНАЛИЗ ГРАФА =====================
 def analyze_graph(G, node_types):
-    """
-    Анализирует структуру графа и выводит статистику
-    """
     if G.number_of_nodes() == 0:
         return None, None
-    # 1. Основная статистика
     with st.expander("📊 ОСНОВНАЯ СТАТИСТИКА"):
         st.write(f" • Узлов всего: {G.number_of_nodes()}")
         st.write(f" • Связей всего: {G.number_of_edges()}")
         st.write(f" • Плотность графа: {nx.density(G):.4f}")
-    # 2. Статистика по типам узлов
     with st.expander("🎨 УЗЛОВ ПО ТИПАМ"):
         type_counts = {}
         type_degrees = {}
@@ -451,7 +587,6 @@ def analyze_graph(G, node_types):
             st.write(f" • {node_type}:")
             st.write(f" Количество: {count} ({percentage:.1f}%)")
             st.write(f" Средняя связей: {avg_degree:.2f}")
-    # 3. Наиболее связанные узлы
     with st.expander("🔗 ТОП-10 НАИБОЛЕЕ СВЯЗАННЫХ УЗЛОВ"):
         degree_dict = dict(G.degree())
         sorted_nodes = sorted(degree_dict.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -460,35 +595,27 @@ def analyze_graph(G, node_types):
             node_value = node.split(": ", 1)[1] if ": " in node else node
             st.write(f" {i:2d}. {node_value[:35]:35s}")
             st.write(f" Тип: {node_type}, Связей: {degree}")
-    # 4. Поиск ключевых связующих узлов (хабов)
     with st.expander("⭐ КЛЮЧЕВЫЕ СВЯЗУЮЩИЕ УЗЛЫ (ХАБЫ)"):
         hub_candidates = []
         for node in G.nodes():
             neighbors = list(G.neighbors(node))
-            if len(neighbors) >= 3:  # Узлы с достаточным количеством связей
-                neighbor_types = set()
-                for neighbor in neighbors:
-                    neighbor_type = node_types.get(neighbor, 'Unknown')
-                    neighbor_types.add(neighbor_type)
-                if len(neighbor_types) >= 2:  # Соединяют хотя бы 2 разных типа
+            if len(neighbors) >= 3:
+                neighbor_types = set(node_types.get(neighbor, 'Unknown') for neighbor in neighbors)
+                if len(neighbor_types) >= 2:
                     hub_candidates.append((node, len(neighbors), len(neighbor_types)))
-        # Сортируем по количеству связей
         hub_candidates.sort(key=lambda x: x[1], reverse=True)
         for i, (node, num_connections, num_types) in enumerate(hub_candidates[:5], 1):
             node_value = node.split(": ", 1)[1] if ": " in node else node
             node_type = node_types.get(node, 'Unknown')
             st.write(f" {i}. {node_value[:35]:35s}")
             st.write(f" Тип: {node_type}, Связей: {num_connections}, Типов соседей: {num_types}")
-    # 5. Компоненты связности
     with st.expander("🔗 КОМПОНЕНТЫ СВЯЗНОСТИ"):
         components = list(nx.connected_components(G))
         st.write(f" • Всего компонент связности: {len(components)}")
         if len(components) > 1:
-            st.write(f" • Размеры компонент (отсортировано по убыванию):")
             sorted_components = sorted(components, key=len, reverse=True)
             for i, comp in enumerate(sorted_components[:5], 1):
                 st.write(f" {i}. {len(comp)} узлов ({len(comp) / G.number_of_nodes() * 100:.1f}%)")
-    # 6. Диаметр самой большой компоненты
     if components:
         largest_component = max(components, key=len)
         if len(largest_component) > 1:
@@ -500,7 +627,6 @@ def analyze_graph(G, node_types):
                 except:
                     st.write(f" • Диаметр: невозможно вычислить")
     return dict(G.degree()), components
-
 
 def create_additional_visualizations(G, node_types, node_colors):
     if G.number_of_nodes() == 0:
@@ -544,7 +670,7 @@ def create_additional_visualizations(G, node_types, node_colors):
     overall_avg = sum(avgs) / len(avgs) if avgs else 0
     axes[1, 0].axhline(y=overall_avg, color='red', linestyle='--', alpha=0.7, label=f'Общее среднее: {overall_avg:.2f}')
     axes[1, 0].legend()
-    for bar, avg in zip(bars2, avgs):  # Fixed: zip(bars2, avgs)
+    for bar, avg in zip(bars2, avgs):
         height = bar.get_height()
         axes[1, 0].text(bar.get_x() + bar.get_width() / 2., height + 0.05,
                         f'{avg:.2f}', ha='center', va='bottom', fontsize=9)
@@ -563,7 +689,7 @@ def create_additional_visualizations(G, node_types, node_colors):
     bars3 = axes[1, 1].barh(y_pos, top_node_degrees, color=top_node_colors, alpha=0.8, edgecolor='black')
     axes[1, 1].set_yticks(y_pos)
     axes[1, 1].set_yticklabels(top_node_names)
-    axes[1, 1].invert_yaxis()  # Самый связанный сверху
+    axes[1, 1].invert_yaxis()
     axes[1, 1].set_title('Наиболее связанные узлы', fontsize=12, fontweight='bold')
     axes[1, 1].set_xlabel('Количество связей')
     for bar, degree in zip(bars3, top_node_degrees):
@@ -573,7 +699,6 @@ def create_additional_visualizations(G, node_types, node_colors):
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.suptitle('Аналитическая панель графа связей', fontsize=16, fontweight='bold')
     return fig
-
 
 def save_results(G, node_types, df_graph, degree_dict, components):
     nodes_data = []
@@ -647,7 +772,6 @@ def save_results(G, node_types, df_graph, degree_dict, components):
     output.seek(0)
     return output.getvalue()
 
-
 # Верхняя панель
 st.markdown(" ", unsafe_allow_html=True)
 col_left, col_right = st.columns([7, 3])
@@ -671,7 +795,7 @@ with col_right:
     st.download_button("Выгрузить структуру доски", data=generate_excel(), file_name="tasks_board.xlsx")
     st.download_button("Скачать шаблон таблицы", data=generate_template(), file_name="template.xlsx")
     st.markdown(' ', unsafe_allow_html=True)
-    st.markdown(" 🔵 Сюндюков АВ\ Ведущий эксперт ", unsafe_allow_html=True)
+    st.markdown(" 🔵 Сюндюков АВ\\ Ведущий эксперт ", unsafe_allow_html=True)
     st.markdown(" ", unsafe_allow_html=True)
 
 # Контролы
@@ -690,7 +814,18 @@ with c3:
             st.session_state.expanded_states[key] = expand
         st.rerun()
 with c4:
-    pass  # Removed Настроить связи
+    if st.button("Скачать OilFlow граф (интерактивный HTML)"):
+        html_data = generate_oilflow_html()
+        if html_data:
+            st.download_button(
+                label="⬇ Скачать oilflow_graph.html",
+                data=html_data,
+                file_name="oilflow_graph.html",
+                mime="text/html",
+                key="download_oilflow"
+            )
+        else:
+            st.warning("Нет данных для графа — добавьте этапы и задачи.")
 with c5:
     if st.button("Онтология"):
         data = []
@@ -713,17 +848,13 @@ with c5:
         df_graph = load_and_prepare_data(tmp_path)
         if df_graph is not None:
             G, node_types, node_colors = build_graph(df_graph)
-            # Интерактивный граф с vis.js
             html_graph = visualize_interactive_graph(G, node_types, node_colors)
             if html_graph:
                 st.components.v1.html(html_graph, height=800, width=1200)
-            # Аналитическая панель (статичный Matplotlib)
             fig_analysis = create_additional_visualizations(G, node_types, node_colors)
             if fig_analysis:
                 st.pyplot(fig_analysis)
-            # Анализ в expander'ах
             degree_dict, components = analyze_graph(G, node_types)
-            # Кнопка скачивания
             excel_data = save_results(G, node_types, df_graph, degree_dict, components)
             st.download_button("Скачать анализ в Excel", data=excel_data, file_name="граф_анализ.xlsx")
         else:
@@ -737,7 +868,6 @@ with c6:
         st.rerun()
 with c7:
     if st.button("Рассчитать"):
-        # Generate temp Excel
         data = []
         for stage in st.session_state.stages:
             for task in st.session_state.tasks[stage]:
@@ -758,11 +888,9 @@ with c7:
         df_graph = load_and_prepare_data(tmp_path)
         if df_graph is not None:
             G, node_types, node_colors = build_graph(df_graph)
-            # Интерактивный граф с vis.js
             html_graph = visualize_interactive_graph(G, node_types, node_colors)
             if html_graph:
                 st.components.v1.html(html_graph, height=800, width=1200)
-            # Аналитическая панель
             fig_analysis = create_additional_visualizations(G, node_types, node_colors)
             if fig_analysis:
                 st.pyplot(fig_analysis)
@@ -780,7 +908,6 @@ if st.session_state.loaded:
     stage_width = 340
     padding_per_side = 50
     st.session_state.iterations = []
-    # 1. Левая плашка: "2 итерация" — первые 3 этапа
     start1 = 0
     end1 = min(3, num_stages)
     if end1 - start1 >= 2:
@@ -792,9 +919,8 @@ if st.session_state.loaded:
             'left': left1,
             'color': '#4ECDC4',
             'label': '2 итерация',
-            'top': 20  # самая верхняя
+            'top': 20
         })
-    # 2. Центральная плашка: "3 итерация" — центр, 3–4 этапа
     center_start = max(0, (num_stages // 2) - 2)
     center_end = min(num_stages, center_start + 4)
     if center_end - center_start < 3:
@@ -809,9 +935,8 @@ if st.session_state.loaded:
             'left': left2,
             'color': '#FFD166',
             'label': '3 итерация',
-            'top': 80  # сильно ниже первой
+            'top': 80
         })
-    # 3. Правая плашка: "2 итерация" — последние 3 этапа
     start3 = max(0, num_stages - 3)
     end3 = num_stages
     if end3 - start3 >= 2:
@@ -823,7 +948,7 @@ if st.session_state.loaded:
             'left': left3,
             'color': '#FF6B6B',
             'label': '2 итерация',
-            'top': 140  # ещё ниже — полный разнос
+            'top': 140
         })
 
 # Колонки этапов
@@ -845,7 +970,7 @@ else:
                         st.session_state.editing_stage = None
                         st.rerun()
                 else:
-                    st.markdown(f" {stage} ", unsafe_allow_html=True)
+                    st.markdown(f"<h3 style='margin:0'>{stage}</h3>", unsafe_allow_html=True)
             with header_right:
                 st.markdown(" ", unsafe_allow_html=True)
                 if st.button("✏️", key=f"edit_stage_{i}"):
@@ -853,13 +978,11 @@ else:
                     st.rerun()
                 if i > 0:
                     if st.button("←", key=f"stage_left_{i}"):
-                        st.session_state.stages[i - 1], st.session_state.stages[i] = st.session_state.stages[i], \
-                                                                                     st.session_state.stages[i - 1]
+                        st.session_state.stages[i - 1], st.session_state.stages[i] = st.session_state.stages[i], st.session_state.stages[i - 1]
                         st.rerun()
                 if i < len(st.session_state.stages) - 1:
                     if st.button("→", key=f"stage_right_{i}"):
-                        st.session_state.stages[i], st.session_state.stages[i + 1] = st.session_state.stages[i + 1], \
-                                                                                     st.session_state.stages[i]
+                        st.session_state.stages[i], st.session_state.stages[i + 1] = st.session_state.stages[i + 1], st.session_state.stages[i]
                         st.rerun()
             st.markdown(" ", unsafe_allow_html=True)
             for j, task in enumerate(st.session_state.tasks[stage]):
@@ -871,13 +994,11 @@ else:
                     st.markdown(f" ", unsafe_allow_html=True)
                     if st.session_state.editing_task == (i, j):
                         new_name = st.text_input("Название задачи", value=task['name'])
-                        new_executor = st.selectbox("Исполнитель", personnel, index=personnel.index(task['executor']))
-                        new_approver = st.selectbox("Согласующий", personnel, index=personnel.index(task['approver']))
+                        new_executor = st.selectbox("Исполнитель", personnel, index=personnel.index(task['executor']) if task['executor'] in personnel else 0)
+                        new_approver = st.selectbox("Согласующий", personnel, index=personnel.index(task['approver']) if task['approver'] in personnel else 0)
                         new_deadline = st.date_input("Срок сдачи", value=task['deadline'])
                         new_status = st.selectbox("Статус", ["в работе", "завершен", "ошибка"],
                                                   index=["в работе", "завершен", "ошибка"].index(task['status']))
-                        # Редактирование entries с исправлением
-                        # Очистка entries от None
                         cleaned_entries = []
                         for entry in task['entries']:
                             cleaned = {
@@ -885,7 +1006,7 @@ else:
                                 'input': entry.get('input', '') or '',
                                 'output': entry.get('output', '') or ''
                             }
-                            if cleaned['system'].strip():  # Добавляем только непустые
+                            if cleaned['system'].strip():
                                 cleaned_entries.append(cleaned)
                         if not cleaned_entries:
                             cleaned_entries = [{'system': '', 'input': '', 'output': ''}]
@@ -900,7 +1021,7 @@ else:
                             },
                             use_container_width=True,
                             hide_index=True,
-                            key=f"editor_{i}_{j}"  # Уникальный ключ для таблицы
+                            key=f"editor_{i}_{j}"
                         )
                         col_save, col_cancel = st.columns(2)
                         with col_save:
@@ -910,9 +1031,7 @@ else:
                                 task['approver'] = new_approver
                                 task['deadline'] = new_deadline
                                 task['status'] = new_status
-                                # Фильтруем непустые
-                                task['entries'] = [entry for entry in edited_entries.to_dict(orient='records') if
-                                                   entry['system'].strip()]
+                                task['entries'] = [entry for entry in edited_entries.to_dict(orient='records') if entry['system'].strip()]
                                 st.session_state.editing_task = None
                                 st.rerun()
                         with col_cancel:
@@ -921,16 +1040,15 @@ else:
                                 st.rerun()
                     else:
                         status_map = {'завершен': 'green', 'ошибка': 'red', 'в работе': 'blue'}
-                        st.markdown(f"<span style='color: {status_map[task['status']]};'>{task['status']}</span>",
-                                    unsafe_allow_html=True)
-                        st.markdown(f" Срок: {task['deadline']} ", unsafe_allow_html=True)
-                        st.markdown(f" Исполнитель: {task['executor']} 🔵 ", unsafe_allow_html=True)
-                        st.markdown(f" Согласующий: {task['approver']} 🔵 ", unsafe_allow_html=True)
-                        st.markdown(" Используемые системы: ", unsafe_allow_html=True)
+                        st.markdown(f"<span style='color: {status_map.get(task['status'], 'gray')}; font-weight: bold;'>{task['status']}</span>", unsafe_allow_html=True)
+                        st.markdown(f"**Срок:** {task['deadline']}", unsafe_allow_html=True)
+                        st.markdown(f"**Исполнитель:** {task['executor']} 🔵", unsafe_allow_html=True)
+                        st.markdown(f"**Согласующий:** {task['approver']} 🔵", unsafe_allow_html=True)
+                        st.markdown("**Используемые системы:**", unsafe_allow_html=True)
                         unique_systems = sorted(set(entry['system'] for entry in task['entries'] if entry['system']))
                         for sys in unique_systems:
                             st.markdown(f"- {sys}", unsafe_allow_html=True)
-                        st.markdown("📄 Результаты расчета", unsafe_allow_html=True)
+                        st.markdown("**Результаты расчета**", unsafe_allow_html=True)
                         if st.button("Редактировать", key=f"edit_{i}_{j}"):
                             st.session_state.editing_task = (i, j)
                             st.rerun()
@@ -954,11 +1072,10 @@ else:
 
 # === НОВАЯ ПАНЕЛЬ С ИТЕРАЦИЯМИ ВНИЗУ СТРАНИЦЫ ===
 st.markdown(" ", unsafe_allow_html=True)
-st.markdown(" Итерации ", unsafe_allow_html=True)
-# Отрисовка плашек итераций в нижней панели
+st.markdown("<h2 style='text-align: center;'>Итерации</h2>", unsafe_allow_html=True)
 for it in st.session_state.iterations:
     st.markdown(f"""
-    <div style="position: absolute; top: {it['top'] + 1000}px; left: {it['left']}px; width: {it['width']}px; height: 40px; background-color: {it['color']}; border-radius: 20px; text-align: center; line-height: 40px; color: white; font-weight: bold;">
+    <div style="position: absolute; top: {it['top'] + 1000}px; left: {it['left']}px; width: {it['width']}px; height: 40px; background-color: {it['color']}; border-radius: 20px; text-align: center; line-height: 40px; color: white; font-weight: bold; opacity: 0.9;">
         {it['label']}
     </div>
     """, unsafe_allow_html=True)
