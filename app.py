@@ -13,20 +13,35 @@ import os
 import tempfile
 import json
 import base64
-
 warnings.filterwarnings('ignore')
 plt.rcParams['figure.figsize'] = [16, 12]
 plt.rcParams['font.size'] = 10
 st.set_page_config(layout="wide")
 st.markdown("""
+<style>
+div.stButton > button {
+    padding: 0.1rem 0.3rem;
+    min-width: auto;
+    font-size: 12px;
+}
+</style>
 """, unsafe_allow_html=True)
+
+def get_img_as_base64(file):
+    with open(file, "rb") as f:
+        data = f.read()
+    return base64.b64encode(data).decode()
+
+sanya_img = get_img_as_base64("sanya-bodibilder.png")
+
 # Списки персонала и систем
 personnel = [
-    "Сюндюков А. В.", "Иванова Е. П.", "Петров С. М.", "Сидорова О. И.", "Козлов Д. А.",
-    "Николаев Г. Р.", "Макарова В. Л.", "Орлов Н. С.", "Васнецова Т. К.", "Жуков П. Ф.",
-    "Алексеева М. Д.", "Тихонов И. Г.", "Павлова А. Н.", "Фролов В. Я.", "Савельев К. О.",
-    "Морозова Л. Б.", "Белов Р. Т.", "Комарова Ю. Э.", "Громов Е. Ц.", "Ильина Н. Ч.",
-    "Данилов Б. Х.", "Семёнова З. Щ.", "Блинов М. Ю.", "Ларина А. Ж.", "Гордеев И. У."
+    "Сюндюков А.В.", "Иванова Е.П.", "Петров С.М.", "Сидорова О.И.", "Козлов Д.А.",
+    "Николаев Г.Р.", "Макарова В.Л.", "Орлов Н.С.", "Васнецова Т.К.", "Жуков П.Ф.",
+    "Алексеева М.Д.", "Тихонов И.Г.", "Павлова А.Н.", "Фролов В.Я.", "Савельев К.О.",
+    "Морозова Л.Б.", "Белов Р.Т.", "Комарова Ю.Э.", "Громов Е.Ц.", "Ильина Н.Ч.",
+    "Данилов Б.Х.", "Семёнова З.Щ.", "Блинов М.Ю.", "Ларина А.Ж.", "Гордеев И.У.",
+    "Инженер РНГМ L2", "Инженер ГДМ L2", "Инженер обустройства L2"
 ]
 systems_list = [
     "Сервис Микросервис Б6К Расчет ХВ скважин", "Б6К Расчет Кпрод скважин", "Б6К Расчет Pпл скважин",
@@ -61,14 +76,14 @@ if 'view_mode' not in st.session_state:
     st.session_state.view_mode = "Подробный вид"
 if 'expanded_states' not in st.session_state:
     st.session_state.expanded_states = {}
-
-
+if 'current_board' not in st.session_state:
+    st.session_state.current_board = None
 # Функции для экспорта и импорта
 def generate_excel():
     data = []
-    base_excel_date = datetime(1899, 12, 30).date()  # Добавляем .date() один раз
+    base_excel_date = datetime(1899, 12, 30).date() # Добавляем .date() один раз
     for stage in st.session_state.stages:
-        tasks_in_stage = st.session_state.tasks.get(stage, [])  # Защита от KeyError (рекомендую)
+        tasks_in_stage = st.session_state.tasks.get(stage, []) # Защита от KeyError (рекомендую)
         for task in tasks_in_stage:
             for entry in task['entries']:
                 row = {
@@ -77,7 +92,7 @@ def generate_excel():
                     "Карточка Название": task['name'],
                     "Исполнитель": task['executor'],
                     "Согласующий": task['approver'],
-                    "Срок сдачи": (task['deadline'] - base_excel_date).days,  # Теперь date - date
+                    "Срок сдачи": (task['deadline'] - base_excel_date).days, # Теперь date - date
                     "Статус": task['status'],
                     "Дата создания": task['date'],
                     "Используемые системы": entry['system'],
@@ -90,8 +105,6 @@ def generate_excel():
     df.to_excel(output, index=False, engine='openpyxl')
     output.seek(0)
     return output.getvalue()
-
-
 def generate_template():
     columns = ["Этап Название", "Карточка ID", "Карточка Название", "Исполнитель", "Согласующий", "Срок сдачи",
                "Статус", "Дата создания", "Используемые системы", "Входные данные", "Выходные данные"]
@@ -100,8 +113,6 @@ def generate_template():
     df.to_excel(output, index=False, engine='openpyxl')
     output.seek(0)
     return output.getvalue()
-
-
 def load_board_from_excel(df):
     if df.empty:
         st.error("Файл пустой.")
@@ -113,43 +124,76 @@ def load_board_from_excel(df):
         return False
     new_stages = []
     new_tasks = {}
-    grouped = df.groupby(['Этап Название', 'Карточка ID'])
-    for (stage, card_id), group in grouped:
-        if stage not in new_tasks:
-            new_tasks[stage] = []
+    seen_stages = set()
+    seen_tasks = {} # stage: set of card_ids
+    unique_personnel = set()
+    for _, row in df.iterrows():
+        stage = row['Этап Название']
+        if pd.isna(stage) or not stage:
+            continue # Skip invalid stages
+        if stage not in seen_stages:
+            seen_stages.add(stage)
             new_stages.append(stage)
-        first = group.iloc[0]
-        try:
-            deadline_serial = int(first['Срок сдачи'])
-            deadline = datetime(1899, 12, 30).date() + timedelta(days=deadline_serial)
-        except:
-            deadline = datetime.now().date()
-        task = {
-            'id': card_id,
-            'name': first['Карточка Название'],
-            'executor': first['Исполнитель'],
-            'approver': first['Согласующий'],
-            'deadline': deadline,
-            'status': first['Статус'],
-            'date': first['Дата создания'],
-            'entries': []
-        }
-        for _, row in group.iterrows():
-            entry = {
-                'system': row['Используемые системы'],
-                'input': row['Входные данные'],
-                'output': row['Выходные данные']
+            new_tasks[stage] = []
+            seen_tasks[stage] = set()
+        card_id = row['Карточка ID']
+        if pd.isna(card_id) or not card_id:
+            continue # Skip invalid card_ids
+        if card_id not in seen_tasks[stage]:
+            seen_tasks[stage].add(card_id)
+            deadline_serial = row.get('Срок сдачи')
+            try:
+                deadline_serial = int(deadline_serial)
+                deadline = datetime(1899, 12, 30).date() + timedelta(days=deadline_serial)
+            except:
+                deadline = datetime.now().date()
+            executor = row['Исполнитель']
+            approver = row['Согласующий']
+            unique_personnel.add(executor)
+            unique_personnel.add(approver)
+            task = {
+                'id': card_id,
+                'name': row['Карточка Название'],
+                'executor': executor,
+                'approver': approver,
+                'deadline': deadline,
+                'status': row['Статус'],
+                'date': row['Дата создания'],
+                'entries': []
             }
-            if entry['system']:
-                task['entries'].append(entry)
-        if not any(t['id'] == card_id for t in new_tasks[stage]):
             new_tasks[stage].append(task)
-    st.session_state.stages = list(set(new_stages))
+        # Find the task
+        task = next(t for t in new_tasks[stage] if t['id'] == card_id)
+        system = row['Используемые системы']
+        if pd.isna(system):
+            system = ''
+        else:
+            system = str(system).strip()
+        input_d = row['Входные данные']
+        if pd.isna(input_d):
+            input_d = ''
+        else:
+            input_d = str(input_d).strip()
+        output_d = row['Выходные данные']
+        if pd.isna(output_d):
+            output_d = ''
+        else:
+            output_d = str(output_d).strip()
+        entry = {
+            'system': system,
+            'input': input_d,
+            'output': output_d
+        }
+        if entry['system']:
+            task['entries'].append(entry)
+    st.session_state.stages = new_stages
     st.session_state.tasks = new_tasks
     st.session_state.loaded = True
+    # Add new personnel
+    for p in unique_personnel:
+        if p and p not in personnel:
+            personnel.append(p)
     return True
-
-
 # Модифицированная функция generate_oilflow_html
 def generate_oilflow_html():
     if len(st.session_state.stages) == 0:
@@ -159,7 +203,7 @@ def generate_oilflow_html():
     edges = []
     node_id_counter = 0
     x_base = 100
-    stage_node_ids = []  # Для хранения ID узлов этапов
+    stage_node_ids = [] # Для хранения ID узлов этапов
     for stage_idx, stage_name in enumerate(st.session_state.stages):
         short_stage_label = stage_name[:35] + "..." if len(stage_name) > 35 else stage_name
         stage_node_id = node_id_counter
@@ -167,7 +211,7 @@ def generate_oilflow_html():
         nodes.append({
             'id': stage_node_id,
             'label': short_stage_label,
-            'title': stage_name,  # Полное название при наведении
+            'title': stage_name, # Полное название при наведении
             'x': x_base + stage_idx * 450,
             'y': 120,
             'color': {'background': '#3b82f6', 'border': '#1e40af'},
@@ -180,14 +224,15 @@ def generate_oilflow_html():
         })
         node_id_counter += 1
         y = 280
-        task_node_ids = []  # Для хранения ID узлов задач в текущем этапе
+        task_node_ids = [] # Для хранения ID узлов задач в текущем этапе
         for task_idx, task in enumerate(st.session_state.tasks.get(stage_name, [])):
             task_node_id = node_id_counter
             task_node_ids.append(task_node_id)
             status_color = {
                 'в работе': '#f59e0b',
                 'завершен': '#10b981',
-                'ошибка': '#ef4444'
+                'ошибка': '#ef4444',
+                'пауза': '#808080'
             }.get(task['status'], '#d1d5db')
             short_label = f"{task['id']} — {task['name'][:35]}..." if len(
                 task['name']) > 35 else f"{task['id']} — {task['name']}"
@@ -195,7 +240,7 @@ def generate_oilflow_html():
             nodes.append({
                 'id': task_node_id,
                 'label': short_label,
-                'title': full_label,  # Полное название при наведении
+                'title': full_label, # Полное название при наведении
                 'x': x_base + stage_idx * 450 + 60,
                 'y': y + task_idx * 140,
                 'color': {'background': '#ffffff', 'border': status_color},
@@ -397,8 +442,6 @@ def generate_oilflow_html():
     </html>
     """
     return html.encode('utf-8')
-
-
 # ===================== 1. ЗАГРУЗКА И ПОДГОТОВКА ДАННЫХ =====================
 def load_and_prepare_data(file_path):
     try:
@@ -424,8 +467,6 @@ def load_and_prepare_data(file_path):
         return df_graph
     except Exception as e:
         return None
-
-
 # ===================== 2. ПОСТРОЕНИЕ ГРАФА =====================
 def build_graph(df):
     G = nx.Graph()
@@ -459,8 +500,6 @@ def build_graph(df):
         if card and system:
             G.add_edge(f"Карточка Название: {card}", f"Используемые системы: {system}")
     return G, node_types, node_colors
-
-
 # ===================== 3. ВИЗУАЛИЗАЦИЯ ГРАФА (ИНТЕРАКТИВНАЯ С VIS.JS) =====================
 def visualize_interactive_graph(G, node_types, node_colors):
     if G.number_of_nodes() == 0:
@@ -535,8 +574,6 @@ def visualize_interactive_graph(G, node_types, node_colors):
     </html>
     """
     return html
-
-
 # ===================== 3. ВИЗУАЛИЗАЦИЯ ГРАФА (СТАТИЧНАЯ, ДЛЯ АНАЛИТИКИ) =====================
 def visualize_graph(G, node_types, node_colors):
     if G.number_of_nodes() == 0:
@@ -582,8 +619,6 @@ def visualize_graph(G, node_types, node_colors):
     plt.axis('off')
     plt.tight_layout(rect=[0, 0.03, 0.85, 0.97])
     return fig, ax
-
-
 # ===================== 4. АНАЛИЗ ГРАФА =====================
 def analyze_graph(G, node_types):
     if G.number_of_nodes() == 0:
@@ -592,19 +627,15 @@ def analyze_graph(G, node_types):
     components = list(nx.connected_components(G))
     degree_dict = dict(G.degree())
     return degree_dict, components
-
-
 def generate_analysis_html(G, node_types):
     if G.number_of_nodes() == 0:
         return "<div><h2>Анализ графа</h2><p>Нет данных</p></div>"
     html = "<div style='padding:20px;'><h2>Анализ графа</h2>"
-
     # Основная статистика
     html += "<div style='border:1px solid #ccc; padding:10px; margin-bottom:10px;'><h3>📊 ОСНОВНАЯ СТАТИСТИКА</h3>"
     html += f"<p> • Узлов всего: {G.number_of_nodes()}</p>"
     html += f"<p> • Связей всего: {G.number_of_edges()}</p>"
     html += f"<p> • Плотность графа: {nx.density(G):.4f}</p></div>"
-
     # Узлов по типам
     html += "<div style='border:1px solid #ccc; padding:10px; margin-bottom:10px;'><h3>🎨 УЗЛОВ ПО ТИПАМ</h3>"
     type_counts = {}
@@ -622,7 +653,6 @@ def generate_analysis_html(G, node_types):
         html += f"<p> Количество: {count} ({percentage:.1f}%)</p>"
         html += f"<p> Средняя связей: {avg_degree:.2f}</p>"
     html += "</div>"
-
     # Топ-10 наиболее связанных узлов
     html += "<div style='border:1px solid #ccc; padding:10px; margin-bottom:10px;'><h3>🔗 ТОП-10 НАИБОЛЕЕ СВЯЗАННЫХ УЗЛОВ</h3>"
     degree_dict = dict(G.degree())
@@ -633,7 +663,6 @@ def generate_analysis_html(G, node_types):
         html += f"<p> {i:2d}. {node_value[:35]}</p>"
         html += f"<p> Тип: {node_type}, Связей: {degree}</p>"
     html += "</div>"
-
     # Ключевые связующие узлы
     html += "<div style='border:1px solid #ccc; padding:10px; margin-bottom:10px;'><h3>⭐ КЛЮЧЕВЫЕ СВЯЗУЮЩИЕ УЗЛЫ (ХАБЫ)</h3>"
     hub_candidates = []
@@ -650,7 +679,6 @@ def generate_analysis_html(G, node_types):
         html += f"<p> {i}. {node_value[:35]}</p>"
         html += f"<p> Тип: {node_type}, Связей: {num_connections}, Типов соседей: {num_types}</p>"
     html += "</div>"
-
     # Компоненты связности
     html += "<div style='border:1px solid #ccc; padding:10px; margin-bottom:10px;'><h3>🔗 КОМПОНЕНТЫ СВЯЗНОСТИ</h3>"
     components = list(nx.connected_components(G))
@@ -670,11 +698,8 @@ def generate_analysis_html(G, node_types):
                 except:
                     html += f"<p> • Диаметр: невозможно вычислить</p>"
     html += "</div>"
-
     html += "</div>"
     return html
-
-
 def create_additional_visualizations(G, node_types, node_colors):
     if G.number_of_nodes() == 0:
         return None
@@ -746,8 +771,6 @@ def create_additional_visualizations(G, node_types, node_colors):
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.suptitle('Аналитическая панель графа связей', fontsize=16, fontweight='bold')
     return fig
-
-
 def save_results(G, node_types, df_graph, degree_dict, components):
     nodes_data = []
     for node in G.nodes():
@@ -819,21 +842,16 @@ def save_results(G, node_types, df_graph, degree_dict, components):
         top_nodes_df.to_excel(writer, sheet_name='Топ_Узлов', index=False)
     output.seek(0)
     return output.getvalue()
-
-
 # Функция для генерации полного HTML для онтологии
 def generate_ontology_html(df_graph, G, node_types, node_colors, fig_analysis):
     interactive_html = visualize_interactive_graph(G, node_types, node_colors)
-
     # Сохраняем fig_analysis в BytesIO как PNG
     buf = BytesIO()
     fig_analysis.savefig(buf, format="png", bbox_inches='tight')
     buf.seek(0)
     analysis_img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-
     # Генерация HTML для анализа
     analysis_html = generate_analysis_html(G, node_types)
-
     full_html = f"""
     <!DOCTYPE html>
     <html lang="ru">
@@ -863,8 +881,15 @@ def generate_ontology_html(df_graph, G, node_types, node_colors, fig_analysis):
     </html>
     """
     return full_html.encode('utf-8')
-
-
+# Функция для загрузки доски из локального файла
+def load_local_board(file_path):
+    try:
+        df = pd.read_excel(file_path)
+        if load_board_from_excel(df):
+            st.success("Доска загружена!")
+            st.rerun()
+    except Exception as e:
+        st.error(f"Ошибка загрузки: {e}")
 # Верхняя панель
 st.markdown(" ", unsafe_allow_html=True)
 col_left, col_right = st.columns([7, 3])
@@ -872,7 +897,29 @@ with col_left:
     st.markdown(" ", unsafe_allow_html=True)
     st.button("← Назад")
     st.markdown("<h1>Планировщик производственных задач</h1>", unsafe_allow_html=True)
-    st.markdown("<h3>ООО \"Газпромнефть-Хантос\" \\ Зимнее</h3>", unsafe_allow_html=True)
+    board_options = {
+        "hantos": "ООО \"Газпромнефть-Хантос\" \\ Зимнее",
+        "nng1": "ООО \"Газпромнефть-ННГ\" \\ Новогоднее",
+        "nng2": "ООО \"Газпромнефть-Мегион\" \\ Аганское"
+    }
+    col_btn1, col_btn2, col_btn3 = st.columns(3)
+    with col_btn1:
+        button_type = "primary" if st.session_state.current_board == "hantos" else "secondary"
+        if st.button(board_options["hantos"], type=button_type):
+            st.session_state.current_board = "hantos"
+            load_local_board("hantos.xlsx")  # Замените на реальный путь к файлу
+    with col_btn2:
+        button_type = "primary" if st.session_state.current_board == "nng1" else "secondary"
+        if st.button(board_options["nng1"], type=button_type):
+            st.session_state.current_board = "nng1"
+            load_local_board("nng.xlsx")  # Замените на реальный путь к файлу
+    with col_btn3:
+        button_type = "primary" if st.session_state.current_board == "nng2" else "secondary"
+        if st.button(board_options["nng2"], type=button_type):
+            st.session_state.current_board = "nng2"
+            load_local_board("mgn.xlsx")  # Замените на реальный путь к файлу
+    if st.session_state.current_board:
+        st.markdown(f"<h3>{board_options[st.session_state.current_board]}</h3>", unsafe_allow_html=True)
     st.markdown(" ", unsafe_allow_html=True)
 with col_right:
     board_file = st.file_uploader("Загрузить структуру доски", type=["xlsx"], key="board_upload")
@@ -888,7 +935,7 @@ with col_right:
     st.download_button("Выгрузить структуру доски", data=generate_excel(), file_name="tasks_board.xlsx")
     st.download_button("Скачать шаблон таблицы", data=generate_template(), file_name="template.xlsx")
     st.markdown(' ', unsafe_allow_html=True)
-    st.markdown(" 🔵 Сюндюков АВ\\ Ведущий эксперт ", unsafe_allow_html=True)
+    st.markdown(f"Сюндюков АВ\\ Ведущий эксперт <img src='data:image/png;base64,{sanya_img}' style='width:20px; height:20px; border-radius:50%; vertical-align: middle;'>", unsafe_allow_html=True)
     st.markdown(" ", unsafe_allow_html=True)
 # Контролы
 c1, c2, c3, c4, c5, c6, c7 = st.columns([1.5, 1, 2, 2, 1, 1, 2])
@@ -942,7 +989,7 @@ with c5:
             G, node_types, node_colors = build_graph(df_graph)
             # Генерация HTML для онтологии
             fig_analysis = create_additional_visualizations(G, node_types, node_colors)
-            degree_dict, components = analyze_graph(G, node_types)  # Получаем данные, но не отображаем
+            degree_dict, components = analyze_graph(G, node_types) # Получаем данные, но не отображаем
             ontology_html = generate_ontology_html(df_graph, G, node_types, node_colors, fig_analysis)
             st.download_button("Скачать онтологию HTML", ontology_html, "ontology.html", "text/html")
             excel_data = save_results(G, node_types, df_graph, degree_dict, components)
@@ -1066,6 +1113,11 @@ else:
                 if st.button("✏️", key=f"edit_stage_{i}"):
                     st.session_state.editing_stage = i
                     st.rerun()
+                if st.button("🗑️", key=f"delete_stage_{i}"):
+                    del st.session_state.tasks[stage]
+                    st.session_state.stages.pop(i)
+                    st.session_state.editing_stage = None
+                    st.rerun()
                 if i > 0:
                     if st.button("←", key=f"stage_left_{i}"):
                         st.session_state.stages[i - 1], st.session_state.stages[i] = st.session_state.stages[i], \
@@ -1086,23 +1138,56 @@ else:
                     st.markdown(f" ", unsafe_allow_html=True)
                     if st.session_state.editing_task == (i, j):
                         new_name = st.text_input("Название задачи", value=task['name'])
-                        new_executor = st.selectbox("Исполнитель", personnel,
-                                                    index=personnel.index(task['executor']) if task[
-                                                                                                   'executor'] in personnel else 0)
-                        new_approver = st.selectbox("Согласующий", personnel,
-                                                    index=personnel.index(task['approver']) if task[
-                                                                                                   'approver'] in personnel else 0)
+                        # For executor
+                        executor_options = personnel + ["Добавить нового..."]
+                        try:
+                            exec_index = executor_options.index(task['executor'])
+                        except ValueError:
+                            exec_index = len(executor_options) - 1
+                        selected_executor = st.selectbox("Исполнитель", executor_options, index=exec_index)
+                        if selected_executor == "Добавить нового...":
+                            custom_executor = st.text_input("Введите ФИО нового исполнителя", value=task['executor'] if exec_index == len(executor_options) - 1 else "")
+                            new_executor = custom_executor
+                        else:
+                            new_executor = selected_executor
+                        # For approver
+                        approver_options = personnel + ["Добавить нового..."]
+                        try:
+                            appr_index = approver_options.index(task['approver'])
+                        except ValueError:
+                            appr_index = len(approver_options) - 1
+                        selected_approver = st.selectbox("Согласующий", approver_options, index=appr_index)
+                        if selected_approver == "Добавить нового...":
+                            custom_approver = st.text_input("Введите ФИО нового согласующего", value=task['approver'] if appr_index == len(approver_options) - 1 else "")
+                            new_approver = custom_approver
+                        else:
+                            new_approver = selected_approver
                         new_deadline = st.date_input("Срок сдачи", value=task['deadline'])
-                        new_status = st.selectbox("Статус", ["в работе", "завершен", "ошибка"],
-                                                  index=["в работе", "завершен", "ошибка"].index(task['status']))
+                        new_status = st.selectbox("Статус", ["в работе", "завершен", "ошибка", "пауза"],
+                                                  index=["в работе", "завершен", "ошибка", "пауза"].index(task['status']) if task['status'] in ["в работе", "завершен", "ошибка", "пауза"] else 0)
                         cleaned_entries = []
                         for entry in task['entries']:
+                            system = entry.get('system')
+                            if system is None or pd.isna(system):
+                                system = ''
+                            else:
+                                system = str(system).strip()
+                            input_d = entry.get('input')
+                            if input_d is None or pd.isna(input_d):
+                                input_d = ''
+                            else:
+                                input_d = str(input_d).strip()
+                            output_d = entry.get('output')
+                            if output_d is None or pd.isna(output_d):
+                                output_d = ''
+                            else:
+                                output_d = str(output_d).strip()
                             cleaned = {
-                                'system': entry.get('system', '') or '',
-                                'input': entry.get('input', '') or '',
-                                'output': entry.get('output', '') or ''
+                                'system': system,
+                                'input': input_d,
+                                'output': output_d
                             }
-                            if cleaned['system'].strip():
+                            if cleaned['system']:
                                 cleaned_entries.append(cleaned)
                         if not cleaned_entries:
                             cleaned_entries = [{'system': '', 'input': '', 'output': ''}]
@@ -1111,7 +1196,11 @@ else:
                             entries_df,
                             num_rows="dynamic",
                             column_config={
-                                "system": st.column_config.SelectboxColumn("Система", options=systems_list),
+                                "system": st.column_config.SelectboxColumn(
+                                    "Система",
+                                    options=systems_list,
+                                    required=False
+                                ),
                                 "input": st.column_config.TextColumn("Входные данные"),
                                 "output": st.column_config.TextColumn("Выходные данные")
                             },
@@ -1124,11 +1213,39 @@ else:
                             if st.button("Сохранить", key=f"save_{i}_{j}"):
                                 task['name'] = new_name
                                 task['executor'] = new_executor
+                                if new_executor and new_executor not in personnel and new_executor != "Добавить нового...":
+                                    personnel.append(new_executor)
                                 task['approver'] = new_approver
+                                if new_approver and new_approver not in personnel and new_approver != "Добавить нового...":
+                                    personnel.append(new_approver)
                                 task['deadline'] = new_deadline
                                 task['status'] = new_status
-                                task['entries'] = [entry for entry in edited_entries.to_dict(orient='records') if
-                                                   entry['system'].strip()]
+                                cleaned_entries = []
+                                for entry in edited_entries.to_dict(orient='records'):
+                                    system = entry.get('system')
+                                    if system is None or pd.isna(system):
+                                        system = ''
+                                    else:
+                                        system = str(system).strip()
+                                    if not system:
+                                        continue
+                                    input_d = entry.get('input')
+                                    if input_d is None or pd.isna(input_d):
+                                        input_d = ''
+                                    else:
+                                        input_d = str(input_d).strip()
+                                    output_d = entry.get('output')
+                                    if output_d is None or pd.isna(output_d):
+                                        output_d = ''
+                                    else:
+                                        output_d = str(output_d).strip()
+                                    cleaned_entry = {
+                                        'system': system,
+                                        'input': input_d,
+                                        'output': output_d
+                                    }
+                                    cleaned_entries.append(cleaned_entry)
+                                task['entries'] = cleaned_entries
                                 st.session_state.editing_task = None
                                 st.rerun()
                         with col_cancel:
@@ -1136,21 +1253,34 @@ else:
                                 st.session_state.editing_task = None
                                 st.rerun()
                     else:
-                        status_map = {'завершен': 'green', 'ошибка': 'red', 'в работе': 'blue'}
+                        status_map = {'завершен': 'green', 'ошибка': 'red', 'в работе': 'blue', 'пауза': 'gray'}
                         st.markdown(
                             f"<span style='color: {status_map.get(task['status'], 'gray')}; font-weight: bold;'>{task['status']}</span>",
                             unsafe_allow_html=True)
                         st.markdown(f"**Срок:** {task['deadline']}", unsafe_allow_html=True)
-                        st.markdown(f"**Исполнитель:** {task['executor']} 🔵", unsafe_allow_html=True)
-                        st.markdown(f"**Согласующий:** {task['approver']} 🔵", unsafe_allow_html=True)
+                        if task['executor'] == "Сюндюков А.В.":
+                            st.markdown(f"**Исполнитель:** {task['executor']} <img src='data:image/png;base64,{sanya_img}' style='width:20px; height:20px; border-radius:50%; vertical-align: middle;'>", unsafe_allow_html=True)
+                        else:
+                            st.markdown(f"**Исполнитель:** {task['executor']} 🔵", unsafe_allow_html=True)
+                        if task['approver'] == "Сюндюков А.В.":
+                            st.markdown(f"**Согласующий:** {task['approver']} <img src='data:image/png;base64,{sanya_img}' style='width:20px; height:20px; border-radius:50%; vertical-align: middle;'>", unsafe_allow_html=True)
+                        else:
+                            st.markdown(f"**Согласующий:** {task['approver']} 🔵", unsafe_allow_html=True)
                         st.markdown("**Используемые системы:**", unsafe_allow_html=True)
-                        unique_systems = sorted(set(entry['system'] for entry in task['entries'] if entry['system']))
+                        unique_systems = list(dict.fromkeys(entry['system'] for entry in task['entries'] if isinstance(entry.get('system'), str) and entry['system'].strip()))
                         for sys in unique_systems:
                             st.markdown(f"- {sys}", unsafe_allow_html=True)
                         st.markdown("**Результаты расчета**", unsafe_allow_html=True)
-                        if st.button("Редактировать", key=f"edit_{i}_{j}"):
-                            st.session_state.editing_task = (i, j)
-                            st.rerun()
+                        col_edit, col_delete = st.columns(2)
+                        with col_edit:
+                            if st.button("Редактировать", key=f"edit_{i}_{j}"):
+                                st.session_state.editing_task = (i, j)
+                                st.rerun()
+                        with col_delete:
+                            if st.button("Удалить", key=f"delete_task_{i}_{j}"):
+                                st.session_state.tasks[stage].pop(j)
+                                st.session_state.editing_task = None
+                                st.rerun()
                     st.markdown(" ", unsafe_allow_html=True)
             if st.button("+ Добавить задачу", key=f"add_{i}"):
                 new_task = {
@@ -1169,12 +1299,13 @@ else:
             st.markdown(" ", unsafe_allow_html=True)
             st.markdown(" ", unsafe_allow_html=True)
 # === НОВАЯ ПАНЕЛЬ С ИТЕРАЦИЯМИ ВНИЗУ СТРАНИЦЫ ===
-st.markdown(" ", unsafe_allow_html=True)
-st.markdown("<h2 style='text-align: center;'>Итерации</h2>", unsafe_allow_html=True)
+st.markdown('<div style="position: relative; min-height: 200px;">', unsafe_allow_html=True)
+st.markdown("<h2 style='text-align: center; margin-bottom: 10px;'>Итерации</h2>", unsafe_allow_html=True)
 for it in st.session_state.iterations:
     st.markdown(f"""
-    <div style="position: absolute; top: {it['top'] + 1000}px; left: {it['left']}px; width: {it['width']}px; height: 40px; background-color: {it['color']}; border-radius: 20px; text-align: center; line-height: 40px; color: white; font-weight: bold; opacity: 0.9;">
+    <div style="position: absolute; top: {it['top']}px; left: {it['left']}px; width: {it['width']}px; height: 40px; background-color: {it['color']}; border-radius: 20px; text-align: center; line-height: 40px; color: white; font-weight: bold; opacity: 0.9;">
         {it['label']}
     </div>
     """, unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
 st.markdown(" ", unsafe_allow_html=True)
