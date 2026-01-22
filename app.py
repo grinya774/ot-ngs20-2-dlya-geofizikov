@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 import random
 import networkx as nx
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
 import matplotlib.patches as mpatches
 import numpy as np
 import warnings
@@ -232,7 +231,8 @@ def generate_oilflow_html():
                 'в работе': '#f59e0b',
                 'завершен': '#10b981',
                 'ошибка': '#ef4444',
-                'пауза': '#808080'
+                'пауза': '#'
+                         '080'
             }.get(task['status'], '#d1d5db')
             short_label = f"{task['id']} — {task['name'][:35]}..." if len(
                 task['name']) > 35 else f"{task['id']} — {task['name']}"
@@ -318,10 +318,6 @@ def generate_oilflow_html():
                 pointer-events: none;
             }}
             #instructions strong {{ color: #1d4ed8; }}
-            .selected-source {{
-                border: 4px solid #60a5fa !important;
-                box-shadow: 0 0 12px rgba(96,165,250,0.6) !important;
-            }}
         </style>
     </head>
     <body>
@@ -358,7 +354,7 @@ def generate_oilflow_html():
                 layout: {{ hierarchical: {{ enabled: false }} }},
                 interaction: {{
                     dragNodes: true,
-                    dragView: true,
+                    dragView: false,
                     zoomView: true,
                     multiselect: true,
                     hover: true,
@@ -368,13 +364,15 @@ def generate_oilflow_html():
             }};
             var network = new vis.Network(container, data, options);
             var selectedSource = null;
+            var originalBorder = null;
             network.on("click", function(params) {{
                 if (params.nodes.length > 0) {{
                     var clickedNode = params.nodes[0];
                     if (selectedSource === null) {{
                         selectedSource = clickedNode;
-                        // Добавляем класс вместо изменения цвета
-                        network.body.nodes[clickedNode].options.className = 'selected-source';
+                        originalBorder = nodes.get(clickedNode).color.border;
+                        nodes.update([{{id: clickedNode, color: {{border: '#60a5fa'}} }}]);
+                        network.setOptions({{interaction: {{dragNodes: false}}}});
                         network.redraw();
                     }} else if (selectedSource !== clickedNode) {{
                         var newEdgeId = 'e_custom_' + Date.now();
@@ -387,14 +385,15 @@ def generate_oilflow_html():
                             color: {{ color: '#64748b', highlight: '#3b82f6' }},
                             width: 1.5
                         }});
-                        // Убираем выделение источника
-                        network.body.nodes[selectedSource].options.className = '';
+                        nodes.update([{{id: selectedSource, color: {{border: originalBorder}} }}]);
+                        network.setOptions({{interaction: {{dragNodes: true}}}});
                         network.redraw();
                         selectedSource = null;
                     }}
                 }} else {{
                     if (selectedSource !== null) {{
-                        network.body.nodes[selectedSource].options.className = '';
+                        nodes.update([{{id: selectedSource, color: {{border: originalBorder}} }}]);
+                        network.setOptions({{interaction: {{dragNodes: true}}}});
                         network.redraw();
                         selectedSource = null;
                     }}
@@ -1196,10 +1195,8 @@ else:
                             entries_df,
                             num_rows="dynamic",
                             column_config={
-                                "system": st.column_config.SelectboxColumn(
-                                    "Система",
-                                    options=systems_list,
-                                    required=False
+                                "system": st.column_config.TextColumn(
+                                    "Система"
                                 ),
                                 "input": st.column_config.TextColumn("Входные данные"),
                                 "output": st.column_config.TextColumn("Выходные данные")
@@ -1213,10 +1210,10 @@ else:
                             if st.button("Сохранить", key=f"save_{i}_{j}"):
                                 task['name'] = new_name
                                 task['executor'] = new_executor
-                                if new_executor and new_executor not in personnel and new_executor != "Добавить нового...":
+                                if new_executor and new_executor not in personnel:
                                     personnel.append(new_executor)
                                 task['approver'] = new_approver
-                                if new_approver and new_approver not in personnel and new_approver != "Добавить нового...":
+                                if new_approver and new_approver not in personnel:
                                     personnel.append(new_approver)
                                 task['deadline'] = new_deadline
                                 task['status'] = new_status
